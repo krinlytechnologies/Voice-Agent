@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mona
+      POSTGRES_PASSWORD: mona_local_only
+      POSTGRES_DB: mona
+    ports:
+      - "5434:5432"
+    volumes:
+      - mona_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mona -d mona"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mona_pgdata:

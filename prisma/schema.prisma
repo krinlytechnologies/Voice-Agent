@@ -1,0 +1,338 @@
+// Source of truth for the application database. Runs on any PostgreSQL 14+:
+// local Docker today, the future Supabase project later (only DATABASE_URL changes).
+//
+// Tenancy is enforced in the application layer (see src/lib/workspace.ts): every
+// query on a tenant table is scoped by a client id resolved from the caller's
+// client_members row. Identity is an opaque user id from the auth provider, so
+// there are no foreign keys into auth-provider schemas.
+//
+// Status-like columns are text with CHECK constraints (see prisma/migrations),
+// because the UI works with the human-readable display strings directly.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Local accounts. Passwords are stored as salted scrypt hashes; sessions are opaque random
+// tokens stored only as SHA-256 hashes, so a database leak does not yield usable sessions.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique @db.VarChar(255)
+  fullName     String   @default("") @map("full_name") @db.VarChar(100)
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  memberships ClientMember[]
+  sessions    Session[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// Every sign-in attempt, used to slow down password guessing per email address.
+model LoginAttempt {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @db.VarChar(255)
+  succeeded Boolean
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([email, createdAt])
+  @@map("login_attempts")
+}
+
+model Client {
+  id            String   @id @default(uuid()) @db.Uuid
+  name          String
+  status        String   @default("active")
+  creditBalance Int      @default(0) @map("credit_balance")
+  createdBy     String?  @map("created_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  members        ClientMember[]
+  campaigns      Campaign[]
+  leads          Lead[]
+  prompts        Prompt[]
+  calls          Call[]
+  creditLedger   CreditTransaction[]
+  voiceJobs      VoiceEngineJob[]
+  inboundNumbers InboundNumber[]
+
+  @@map("clients")
+}
+
+model ClientMember {
+  id           String   @id @default(uuid()) @db.Uuid
+  clientId     String   @map("client_id") @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  role         String   @default("member")
+  invitedEmail String   @default("") @map("invited_email")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, userId])
+  @@index([userId])
+  @@map("client_members")
+}
+
+model CreditTransaction {
+  id        String   @id @default(uuid()) @db.Uuid
+  clientId  String   @map("client_id") @db.Uuid
+  amount    Int
+  note      String   @default("")
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, createdAt])
+  @@map("credit_transactions")
+}
+
+model Campaign {
+  id                 String   @id @default(uuid()) @db.Uuid
+  clientId           String   @map("client_id") @db.Uuid
+  name               String   @db.VarChar(100)
+  purpose            String   @default("")
+  status             String   @default("Scheduled")
+  personaKey         String   @default("") @map("persona_key")
+  voice              String   @default("")
+  ambience           Boolean  @default(false)
+  callingStart       String   @default("09:00") @map("calling_start") @db.VarChar(5)
+  callingEnd         String   @default("18:00") @map("calling_end") @db.VarChar(5)
+  maxTries           Int      @default(3) @map("max_tries")
+  retryGapMinutes    Int      @default(30) @map("retry_gap_minutes")
+  callbackWindowDays Int      @default(3) @map("callback_window_days")
+  creditCap          Int?     @map("credit_cap")
+  createdBy          String?  @map("created_by") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  client    Client           @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  leads     Lead[]
+  calls     Call[]
+  voiceJobs VoiceEngineJob[]
+
+  @@index([clientId, createdAt])
+  @@map("campaigns")
+}
+
+model Lead {
+  id         String    @id @default(uuid()) @db.Uuid
+  clientId   String    @map("client_id") @db.Uuid
+  campaignId String    @map("campaign_id") @db.Uuid
+  name       String    @default("—")
+  phone      String    @db.VarChar(16)
+  outcome    String    @default("Not called")
+  queueState String    @default("Queued") @map("queue_state")
+  attempts   Int       @default(0)
+  followUpAt DateTime? @map("follow_up_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  client   Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  calls    Call[]
+
+  @@unique([campaignId, phone])
+  @@index([clientId])
+  @@map("leads")
+}
+
+model Prompt {
+  id             String   @id @default(uuid()) @db.Uuid
+  clientId       String   @map("client_id") @db.Uuid
+  personaKey     String   @map("persona_key") @db.VarChar(40)
+  name           String   @db.VarChar(100)
+  purpose        String   @default("")
+  active         Boolean  @default(true)
+  language       String   @default("English")
+  instructions   String   @default("")
+  knowledge      String   @default("")
+  greeting       String   @default("")
+  currentVersion Int      @default(1) @map("current_version")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  client   Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  versions PromptVersion[]
+
+  @@unique([clientId, personaKey])
+  @@map("prompts")
+}
+
+// Immutable snapshots: the application only inserts these, never updates or deletes.
+model PromptVersion {
+  id        String   @id @default(uuid()) @db.Uuid
+  promptId  String   @map("prompt_id") @db.Uuid
+  version   Int
+  content   Json
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  prompt Prompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+
+  @@unique([promptId, version])
+  @@map("prompt_versions")
+}
+
+// One finished call. Campaign calls and inbound calls share this table.
+// `outcome` is Mona's normalized label (see src/lib/outcomes.ts); `outcomeRaw` keeps exactly what the
+// engine reported. `clientId` always comes from Mona's own records (the campaign, or the inbound
+// number mapping), never from the engine's message. `transcriptRef` is an opaque engine call id, not
+// a link: the transcript is read server-side, per call, after a workspace check.
+model Call {
+  id              String    @id @default(uuid()) @db.Uuid
+  clientId        String    @map("client_id") @db.Uuid
+  campaignId      String?   @map("campaign_id") @db.Uuid
+  leadId          String?   @map("lead_id") @db.Uuid
+  jobId           String?   @map("job_id") @db.Uuid
+  inboundNumberId String?   @map("inbound_number_id") @db.Uuid
+  direction       String    @default("outbound")
+  // Inbound: the caller. Outbound: not recorded by the engine.
+  callerNumber    String?   @map("caller_number") @db.VarChar(20)
+  // Inbound: our number that was dialled (E.164). Outbound: the contact's number.
+  dialledNumber   String?   @map("dialled_number") @db.VarChar(20)
+  status          String    @default("completed") @db.VarChar(40)
+  outcome         String    @default("completed")
+  outcomeRaw      String?   @map("outcome_raw") @db.VarChar(200)
+  summary         String?
+  collectedFields Json?     @map("collected_fields")
+  durationSeconds Int       @default(0) @map("duration_seconds")
+  transcriptUrl   String?   @map("transcript_url")
+  transcriptRef   String?   @map("transcript_ref") @db.VarChar(40)
+  engineCallId    String?   @unique @map("engine_call_id")
+  // When the engine produced the event that last wrote this row; an older event never overwrites a newer one.
+  reportedAt      DateTime? @map("reported_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  client        Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign      Campaign?       @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  lead          Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  job           VoiceEngineJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  inboundNumber InboundNumber?  @relation(fields: [inboundNumberId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, createdAt])
+  @@index([clientId, direction, createdAt(sort: Desc)])
+  @@index([clientId, outcome])
+  @@index([campaignId])
+  @@map("calls")
+}
+
+// One dispatch of a campaign to the external voice engine. The partial unique index
+// "at most one non-terminal job per campaign" is added in a hand-written migration
+// because Prisma cannot express partial indexes.
+model VoiceEngineJob {
+  id             String    @id @default(uuid()) @db.Uuid
+  clientId       String    @map("client_id") @db.Uuid
+  campaignId     String    @map("campaign_id") @db.Uuid
+  idempotencyKey String    @unique @default(uuid()) @map("idempotency_key") @db.Uuid
+  status         String    @default("pending")
+  // The prompt version the campaign was started with (the engine speaks that copy).
+  personaVersion Int?      @map("persona_version")
+  engineJobId    String?   @unique @map("engine_job_id")
+  lastError      String?   @map("last_error")
+  dispatchedAt   DateTime? @map("dispatched_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  client   Client                    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  campaign Campaign                  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  events   VoiceEngineWebhookEvent[]
+  calls    Call[]
+
+  @@index([campaignId])
+  @@map("voice_engine_jobs")
+}
+
+// Every webhook delivery, keyed by the engine's event id, so retries and replays
+// are rejected before they can double-count a call or usage.
+model VoiceEngineWebhookEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  eventId    String   @unique @map("event_id")
+  jobId      String?  @map("job_id") @db.Uuid
+  eventType  String   @map("event_type")
+  payload    Json
+  receivedAt DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
+
+  job VoiceEngineJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([jobId])
+  @@map("voice_engine_webhook_events")
+}
+
+// A dialled number answered by one persona. This row is the DRAFT edited on the Inbound screen; calls
+// follow only what was last published to the engine (the newest `synced` InboundPublication).
+// The phone is globally unique: one number can never route for two workspaces.
+model InboundNumber {
+  id                 String   @id @default(uuid()) @db.Uuid
+  clientId           String   @map("client_id") @db.Uuid
+  phone              String   @unique @db.VarChar(16)
+  personaKey         String   @map("persona_key") @db.VarChar(40)
+  workflow           String   @default("general")
+  active             Boolean  @default(true)
+  // Highest version the engine reported holding, so a publish never goes out below it.
+  knownEngineVersion Int      @default(0) @map("known_engine_version")
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  client       Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  publications InboundPublication[]
+  calls        Call[]
+
+  @@index([clientId])
+  @@map("inbound_numbers")
+}
+
+// One attempt to publish a number's route. `snapshot` is exactly what was sent to the engine, so a
+// rollback re-sends an earlier snapshot rather than rebuilding it from today's persona.
+model InboundPublication {
+  id             String    @id @default(uuid()) @db.Uuid
+  numberId       String    @map("number_id") @db.Uuid
+  version        Int
+  status         String    @default("pending")
+  snapshot       Json
+  personaVersion Int       @map("persona_version")
+  error          String?
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  syncedAt       DateTime? @map("synced_at") @db.Timestamptz(6)
+
+  number InboundNumber @relation(fields: [numberId], references: [id], onDelete: Cascade)
+
+  @@unique([numberId, version])
+  @@map("inbound_publications")
+}
+
+model DemoRequest {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(100)
+  email     String   @db.VarChar(255)
+  phone     String   @db.VarChar(20)
+  company   String   @default("") @db.VarChar(120)
+  message   String   @default("") @db.VarChar(600)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt(sort: Desc)])
+  @@map("demo_requests")
+}

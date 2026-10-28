@@ -1,0 +1,16 @@
+- [x] Build original Campaigns list and detail views in the existing light theme.
+- [x] Add demo search, filters, creation/editing, lead upload and report export.
+- [x] Verify signed-in navigation and campaign interactions.
+- [x] Add the three-step campaign setup, scheduling and retry controls, contacts preview, and voice selection.
+- [x] Verify the name-and-number CSV template and complete campaign creation flow.
+- [x] Build an original Voice Leads page with campaign selection, pipeline, outcomes, and searchable lead records.
+- [x] Verify signed-in Voice Leads navigation, filters, uploads, and sample controls.
+- [x] Build Prompts with original generic personas, editing, call settings, and temporary version history.
+- [x] Verify signed-in prompt editing, creation, saving, and restoration.
+- [x] Expand Add persona with display name, persona key, purpose, language, and instructions; verify creation.
+- [x] Design Outbound Calls and Missed Callbacks with sample records, filters, notes, and CSV downloads.
+- [x] Verify signed-in navigation and both pages' interactions at wide and narrow sizes.
+- [x] Rename Dispositions and build Call Outcome Rules with threshold, ordered definitions, toggles, custom rules, reset and sample saving.
+- [x] Verify outcome-rule editing, ordering, custom creation and narrow-screen layout.
+- [x] Fix the official logo URL for external hosting without changing its layout.
+- [x] Verify desktop/mobile logo loading and explain GitHub/Vercel verification limits.
